@@ -16,6 +16,20 @@ if "known_db" not in st.session_state:
 if "run_detection" not in st.session_state:
     st.session_state.run_detection = False
 
+# Helper function: scan available webcams
+def list_available_cameras(max_index=5):
+    available = []
+    for i in range(max_index + 1):
+        cap = cv2.VideoCapture(i)
+        if cap is None or not cap.isOpened():
+            cap.release()
+            continue
+        ret, _ = cap.read()
+        if ret:
+            available.append(i)
+        cap.release()
+    return available
+
 # Sidebar — Known Face Management
 with st.sidebar:
     st.header("📷 Add Known Faces")
@@ -49,7 +63,11 @@ with st.sidebar:
 with st.sidebar:
     st.header("🎛️ Detection Settings")
 
-    camera_source = st.selectbox("Camera Source", ["Webcam (0)", "Webcam (1)", "RTSP"])
+    available_cams = list_available_cameras(max_index=5)
+    cam_options = [f"Webcam ({i})" for i in available_cams]
+    cam_options.append("RTSP")
+
+    camera_source = st.selectbox("Camera Source", cam_options)
     rtsp_url = st.text_input("RTSP URL", "rtsp://") if camera_source == "RTSP" else None
     threshold = st.slider("Similarity Threshold", 0.0, 1.0, 0.24, 0.01)
 
@@ -75,12 +93,10 @@ if st.session_state.run_detection:
     else:
         st.success("✅ Detection Running...")
 
-        if camera_source == "RTSP":
-            source = rtsp_url
-        elif camera_source == "Webcam (0)":
-            source = 0
+        if camera_source.startswith("Webcam"):
+            source = int(camera_source.split("(")[1].split(")")[0])
         else:
-            source = 1
+            source = rtsp_url
 
         cap = cv2.VideoCapture(source)
         frame_display = st.empty()
