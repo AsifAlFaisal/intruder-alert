@@ -1,0 +1,8 @@
+streamlit
+opencv-python
+mediapipe
+numpy
+torch
+deepface
+scipy
+tf-keras
