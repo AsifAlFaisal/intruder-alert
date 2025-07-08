@@ -1,142 +1,106 @@
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import cv2
 import mediapipe as mp
 import numpy as np
 from datetime import datetime
-import torch
 from deepface import DeepFace
 from scipy.spatial.distance import cosine
+import av
 
 # Page setup
 st.set_page_config(page_title="⚡ Intruder Detection Demo", layout="wide", page_icon="🛡️")
 st.title("🛡️ Intruder Detector Demo")
 
-# Initialize session state
+# Session state
 if "known_db" not in st.session_state:
     st.session_state.known_db = {}
 if "run_detection" not in st.session_state:
     st.session_state.run_detection = False
 
-# Sidebar — Known Face Management
+# Sidebar — face management
 with st.sidebar:
     st.header("📷 Add Known Faces")
-
-    uploaded_photo = st.camera_input("Take a Known Face Photo from Multiple Angle")
-
-    if uploaded_photo:
-        name_input = st.text_input("Name for this Face", value="", key="face_name")
+    uploaded = st.camera_input("Take a Known Face Photo")
+    if uploaded:
+        name = st.text_input("Name", key="face_name")
         if st.button("➕ Add Face"):
-            if not name_input.strip():
-                st.error("Please enter a name.")
-            else:
-                img_bytes = uploaded_photo.getvalue()
-                np_img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
-                np_img = cv2.cvtColor(np_img, cv2.COLOR_BGR2RGB)
-                try:
-                    embedding = DeepFace.represent(img_path=np_img, model_name="SFace", enforce_detection=False)[0]['embedding']
-                    st.session_state.known_db[name_input.strip()] = np.array(embedding)
-                    st.success(f"Added known face: {name_input.strip()}")
-                except Exception as e:
-                    st.error(f"Error processing photo: {e}")
+            img = cv2.imdecode(np.frombuffer(uploaded.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            emb = DeepFace.represent(img_path=img, model_name="SFace", enforce_detection=False)[0]['embedding']
+            st.session_state.known_db[name.strip()] = np.array(emb)
+            st.success(f"Added: {name}")
 
     if st.session_state.known_db:
-        with st.expander("👥 View Known Faces"):
-            for name in st.session_state.known_db.keys():
-                st.markdown(f"- {name}")
+        st.expander("👥 Known Faces", expanded=True)
+        for n in st.session_state.known_db:
+            st.write(f"- {n}")
     else:
-        st.info("No known faces added yet.")
+        st.info("No known faces yet.")
 
-# Sidebar — Detection Controls
+# Sidebar — controls
 with st.sidebar:
-    st.header("🎛️ Detection Settings")
-    camera_source = st.selectbox("Camera Source", ["Webcam (0)", "RTSP"])
-    rtsp_url = st.text_input("RTSP URL", "rtsp://") if camera_source == "RTSP" else None
+    st.header("🎛️ Settings")
     threshold = st.slider("Similarity Threshold", 0.0, 1.0, 0.24, 0.01)
+    if st.button("▶️ Start"):
+        st.session_state.run_detection = True
+    if st.button("⏹️ Stop"):
+        st.session_state.run_detection = False
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("▶️ Start Detection"):
-            st.session_state.run_detection = True
-    with col2:
-        if st.button("⏹️ Stop Detection"):
-            st.session_state.run_detection = False
+# MediaPipe setup
+mp_face = mp.solutions.face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.6)
 
-# Alert cooldown
+# WebRTC config
+RTC_CONF = RTCConfiguration({"iceServers":[{"urls":["stun:stun.l.google.com:19302"]}]})
+
+# Context and alert state
 ALERT_COOLDOWN = 10
-last_alert_time = datetime.now()
+last_alert = datetime.now()
 
-# MediaPipe face detection setup
-mp_face_detection = mp.solutions.face_detection
+# Define processor
+class IntruderProcessor(VideoProcessorBase):
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        global last_alert
+        img = frame.to_ndarray(format="bgr24")
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = mp_face.process(rgb)
 
-# Run detection loop
+        if results.detections:
+            h, w, _ = img.shape
+            for d in results.detections:
+                box = d.location_data.relative_bounding_box
+                x1, y1 = int(box.xmin*w), int(box.ymin*h)
+                x2, y2 = x1 + int(box.width*w), y1 + int(box.height*h)
+                x1, y1 = max(0, x1), max(0, y1)
+                face = cv2.resize(rgb[y1:y2, x1:x2], (112,112))
+                emb = np.array(DeepFace.represent(img_path=face, model_name="SFace", enforce_detection=False)[0]['embedding'])
+
+                best_name, best_sim = "Unknown", 0
+                for nm, ref in st.session_state.known_db.items():
+                    sim = 1 - cosine(emb, ref)
+                    if sim > best_sim:
+                        best_name, best_sim = nm, sim
+
+                if best_sim >= threshold:
+                    label, color = f"{best_name} ({best_sim:.2f})", (0,255,0)
+                else:
+                    label, color = "🚨 Unknown", (0,0,255)
+                    now = datetime.now()
+                    if (now - last_alert).total_seconds() > ALERT_COOLDOWN:
+                        last_alert = now
+                        st.warning(f"🚨 Unknown detected @ {now:%Y-%m-%d %H:%M:%S}")
+
+                cv2.rectangle(img, (x1,y1), (x2,y2), color, 2)
+                cv2.putText(img, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+# Start WebRTC streamer
 if st.session_state.run_detection:
-    if not st.session_state.known_db:
-        st.error("⚠️ Please add at least one known face before starting detection.")
-    else:
-        st.success("✅ Detection Running...")
-        source = rtsp_url if camera_source == "RTSP" else 0
-        cap = cv2.VideoCapture(source)
-        frame_display = st.empty()
-
-        with mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.6) as face_detector:
-            while cap.isOpened() and st.session_state.run_detection:
-                ret, frame = cap.read()
-                if not ret:
-                    st.error("❌ Failed to read frame.")
-                    break
-
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = face_detector.process(rgb)
-
-                if results.detections:
-                    h, w, _ = frame.shape
-                    for detection in results.detections:
-                        box = detection.location_data.relative_bounding_box
-                        x1 = int(box.xmin * w)
-                        y1 = int(box.ymin * h)
-                        x2 = int((box.xmin + box.width) * w)
-                        y2 = int((box.ymin + box.height) * h)
-                        x1, y1 = max(0, x1), max(0, y1)
-                        x2, y2 = min(w, x2), min(h, y2)
-
-                        face_crop = rgb[y1:y2, x1:x2]
-
-                        if face_crop.shape[0] < 50 or face_crop.shape[1] < 50:
-                            continue
-
-                        try:
-                            face_crop = cv2.resize(face_crop, (112, 112))
-                            emb = DeepFace.represent(img_path=face_crop, model_name="SFace", enforce_detection=False)[0]['embedding']
-                            emb = np.array(emb)
-                            best_name = "Unknown"
-                            best_sim = 0.0
-
-                            for name, ref_emb in st.session_state.known_db.items():
-                                sim = 1 - cosine(emb, ref_emb)
-                                if sim > best_sim:
-                                    best_sim = sim
-                                    best_name = name
-
-                            if best_sim >= threshold:
-                                label = f"{best_name} ({best_sim:.2f})"
-                                color = (0, 255, 0)
-                            else:
-                                label = "🚨 Unknown"
-                                color = (0, 0, 255)
-                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                                current_time = datetime.now()
-                                if (current_time - last_alert_time).total_seconds() > ALERT_COOLDOWN:
-                                    last_alert_time = current_time
-                                    st.warning(f"🚨 Unknown face detected at {timestamp}")
-
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-                        except Exception as e:
-                            print(f"Recognition error: {e}")
-
-                frame_display.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB")
-
-        cap.release()
-        frame_display.empty()
-        st.success("🛑 Detection Stopped.")
+    webrtc_ctx = webrtc_streamer(
+        key="intruder",
+        video_processor_factory=IntruderProcessor,
+        rtc_configuration=RTC_CONF,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
