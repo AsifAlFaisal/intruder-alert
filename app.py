@@ -3,7 +3,6 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from datetime import datetime
-import torch
 from deepface import DeepFace
 from scipy.spatial.distance import cosine
 
@@ -21,7 +20,7 @@ if "run_detection" not in st.session_state:
 with st.sidebar:
     st.header("📷 Add Known Faces")
 
-    uploaded_photo = st.camera_input("Take a Known Face Photo from Multiple Angle")
+    uploaded_photo = st.camera_input("Take a Known Face Photo from Multiple Angles")
 
     if uploaded_photo:
         name_input = st.text_input("Name for this Face", value="", key="face_name")
@@ -49,7 +48,8 @@ with st.sidebar:
 # Sidebar — Detection Controls
 with st.sidebar:
     st.header("🎛️ Detection Settings")
-    camera_source = st.selectbox("Camera Source", ["Webcam (0)", "RTSP"])
+
+    camera_source = st.selectbox("Camera Source", ["Webcam (0)", "Webcam (1)", "RTSP"])
     rtsp_url = st.text_input("RTSP URL", "rtsp://") if camera_source == "RTSP" else None
     threshold = st.slider("Similarity Threshold", 0.0, 1.0, 0.24, 0.01)
 
@@ -74,7 +74,14 @@ if st.session_state.run_detection:
         st.error("⚠️ Please add at least one known face before starting detection.")
     else:
         st.success("✅ Detection Running...")
-        source = rtsp_url if camera_source == "RTSP" else 0
+
+        if camera_source == "RTSP":
+            source = rtsp_url
+        elif camera_source == "Webcam (0)":
+            source = 0
+        else:
+            source = 1
+
         cap = cv2.VideoCapture(source)
         frame_display = st.empty()
 
